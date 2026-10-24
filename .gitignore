@@ -8,6 +8,7 @@ codex/
 *.obj
 *.elf
 /firmware/
+/preview/
 *.map
 *.bak-*
 __pycache__/

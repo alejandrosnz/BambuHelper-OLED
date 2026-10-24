@@ -147,7 +147,7 @@ The portal only offers assets whose name starts with `BambuHelper-OLED-<board>-`
 | Pause | `PAUSE` | Same layout with a pause icon and blinking progress fill |
 | Done | `FINISH` | 2-line title, boxed `DONE`, optional cooldown temps; returns to the idle screen after the configured Done duration (default ~3 min, `0` = until the next print) |
 | Error | `FAILED` / print error | `ERR`, code/state and job name |
-| Idle / screensaver | Printer idle | Big clock with a small date line above it (or big temps when the clock is off), optional weather icon + temperature, status icon (X / circle), optional `HOT` warning |
+| Idle / screensaver | Printer idle | Date line on the top edge, big clock in the middle, weather icon + temperature on the bottom edge (or big temps when the clock is off), status icon (X / circle), optional `HOT` warning |
 
 - Static screens refresh once per second; marquee and blink run at ~10 fps.
 - The job title wraps to two 11-character lines and shows `...` on overflow.
@@ -170,6 +170,7 @@ The **OLED** section is split into four cards: **While printing**, **Idle screen
 | Idle screen | Show weather icon + temperature | Off | OpenWeatherMap on the idle clock |
 | Idle screen | Weather API key | *(empty)* | Free OpenWeatherMap key |
 | Idle screen | Location | `Madrid,ES` | `City,CC`, no spaces |
+| Idle screen | Weather in °F | Off | Shows the weather temperature in Fahrenheit; printer temps stay in °C |
 | Idle screen | Show HOT warning | Off | Warns when the nozzle is above 50 °C while idle; only on the big-temps screen (big clock off) |
 | Done screen | Show cooldown temperatures | Off | Nozzle/bed cooldown row on the Done screen |
 | Done screen | Show the Done screen for | 3 minutes | Minutes before returning to idle; `0` = until the next print |
@@ -178,7 +179,7 @@ The **OLED** section is split into four cards: **While printing**, **Idle screen
 
 ### Other settings that affect the mono display
 
-- **Clock:** timezone, 24-hour format, and the small date line above the clock (format picker plus a time-only toggle). The SH1106 has no colour or font-size controls.
+- **Clock:** timezone, 24-hour format, and the date line above the clock (format picker plus a time-only toggle). The SH1106 has no colour or font-size controls.
 - **Printer:** LAN or Bambu Cloud connection and the printer name.
 - **WiFi & System:** WiFi, DHCP/static IP, mDNS hostname, JSON settings backup and OTA.
 - **Diagnostics:** serial log, heap and connection status.
@@ -190,6 +191,7 @@ TFT-only sections (Display, After print, Colors, Hardware, Power) are hidden aut
 - Free OpenWeatherMap key: <https://openweathermap.org/appid>
 - Enable **Show weather icon + temperature**, paste the key, and set the location as `City,CC` (for example `Madrid,ES`). The key and location save when you leave the field.
 - The device polls only while the idle clock is visible, every 15 minutes. The fetch runs in a background task, so it never blocks MQTT or the web server.
+- **Weather in °F** switches only the weather reading to Fahrenheit; the printer temperatures keep their `°C` readout.
 - The API key is stored locally and deliberately **not** included in JSON settings backups.
 
 ## Limitations

@@ -1243,6 +1243,7 @@ function applyDisplay(){
   if (document.getElementById('mno_wen').checked) p.append('mno_wen', '1');
   p.append('mno_wkey', document.getElementById('mno_wkey').value);
   p.append('mno_wq', document.getElementById('mno_wq').value);
+  if (document.getElementById('mno_wf').checked) p.append('mno_wf', '1');
   p.append('mno_cont', document.getElementById('mno_cont').value);
   for (var i = 0; i < GAUGE_KEYS.length; i++){
     var k = GAUGE_KEYS[i];
@@ -1475,6 +1476,12 @@ function toggleMonoOptions(){
     el.disabled = !weatherOn;
     var field = el.closest('.field');
     if (field) field.style.opacity = weatherOn ? '1' : '0.45';
+  }
+  var wf = document.getElementById('mno_wf');
+  if (wf){
+    wf.disabled = !weatherOn;
+    var wfRow = wf.closest('.check-row');
+    if (wfRow) wfRow.style.opacity = weatherOn ? '1' : '0.45';
   }
 }
 

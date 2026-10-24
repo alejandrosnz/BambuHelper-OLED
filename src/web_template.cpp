@@ -128,7 +128,7 @@ static bool resolvePlaceholder(const char* name, String& out) {
 
   // --- Clock ---
   if (strcmp(name, "USE24H") == 0)     { out = netSettings.use24h ? "checked" : ""; return true; }
-  if (strncmp(name, "DATEFMT", 7) == 0 && name[7] >= '0' && name[7] <= '5' && name[8] == '\0') {
+  if (strncmp(name, "DATEFMT", 7) == 0 && name[7] >= '0' && name[7] <= '7' && name[8] == '\0') {
     out = netSettings.dateFormat == (name[7] - '0') ? "selected" : "";
     return true;
   }
@@ -323,6 +323,7 @@ static bool resolvePlaceholder(const char* name, String& out) {
   if (strcmp(name, "MONO_WEN") == 0) { out = monoSettings.weatherEnabled ? "checked" : ""; return true; }
   if (strcmp(name, "MONO_WKEY") == 0) { out = monoSettings.weatherKey; return true; }
   if (strcmp(name, "MONO_WQ") == 0) { out = monoSettings.weatherQuery; return true; }
+  if (strcmp(name, "MONO_WF") == 0) { out = monoSettings.weatherFahrenheit ? "checked" : ""; return true; }
   if (strcmp(name, "MONO_CONT") == 0) { out = String(monoSettings.oledContrast); return true; }
   if (strcmp(name, "CLK_INFO") == 0) { out = dispSettings.showClockInfo ? "checked" : ""; return true; }
   if (strcmp(name, "GESTURE_ROWS") == 0) {

@@ -406,20 +406,40 @@ static void fmtClockMode(char *dst, size_t n, bool *pm) {
     snprintf(dst, n, "%d:%02d", h, tmv.tm_min);
 }
 
-// Date line above the idle clock. Same six formats the Clock section offers;
-// the SH1106 has no colour or size choice, so this is always size 1 (6x8 px).
+// English ordinal suffix for the day ("1st", "2nd", "3rd", "11th"...).
+static const char *ordinalSuffix(int day) {
+  if (day % 100 >= 11 && day % 100 <= 13) return "th";
+  switch (day % 10) {
+    case 1: return "st";
+    case 2: return "nd";
+    case 3: return "rd";
+    default: return "th";
+  }
+}
+
+// Date line above the idle clock. Same eight formats the Clock section offers;
+// the SH1106 has no colour or size choice, so the two long month formats drop to
+// size 1 to fit and the rest use size 2.
 static void fmtClockDate(char *dst, size_t n) {
   if (!dst || n == 0) return;
   dst[0] = '\0';
   static const char *const formats[] = {
       "%d.%m.%Y", "%d-%m-%Y", "%m/%d/%Y",
       "%Y-%m-%d", "%d %b %Y", "%b %d, %Y",
+      "%d %b", "%b %d",  // no year, fit at size 2 (31 Dec / Dec 31st)
   };
   uint8_t f = netSettings.dateFormat;
   if (f >= sizeof(formats) / sizeof(formats[0])) f = 0;
   time_t now = time(nullptr);
   struct tm tmv;
   localtime_r(&now, &tmv);
+  if (f == 7) {
+    // "%b %d" would print "Dec 05"; the ordinal reads better without the zero.
+    char mon[8];
+    strftime(mon, sizeof(mon), "%b", &tmv);
+    snprintf(dst, n, "%s %d%s", mon, tmv.tm_mday, ordinalSuffix(tmv.tm_mday));
+    return;
+  }
   strftime(dst, n, formats[f], &tmv);
 }
 
@@ -683,14 +703,25 @@ static void renderIdle(const BambuState &st) {
   if (monoSettings.showClockIdle) {
     // Spotify clock (ESP-Spotify-OLED printLocalTime): default font, 30x30
     // weather icon at (23,32), size-2 temperature at (60,40) with the degree
-    // bitmap. No printer temps here by design. The small date owns the top
-    // 8 px, so with it visible the clock (and weather block) shift down a few
-    // pixels; with the date hidden the old anchors stay.
+    // bitmap. No printer temps here by design. With the date visible the three
+    // blocks stack edge to edge: date on row 0, weather icon anchored on the
+    // last rows (36..65, its bottom two rows are blank padding), clock centered
+    // in the gap between them. The date uses the same default font and size-2
+    // scale as the temperature, dropping to size 1 only for the two long month
+    // formats that would not fit 128 px. With the date hidden the original
+    // anchors stay untouched.
     bool wxShown = monoSettings.weatherEnabled || monoMockActive();
     bool dateShown = ntpOk() && !dispSettings.hideClockDate;
-    int clkY = wxShown ? (dateShown ? 9 : 5) : (dateShown ? 24 : 20);
-    int wxIconY = dateShown ? 34 : 32;
-    int wxTempY = dateShown ? 42 : 40;
+    const int clkInkH = 18;      // 6 visible glyph rows at size 3 (row 6 is blank)
+    const int clkPairTop = 7;    // date top edge on the date+clock screen
+    const int clkInkGap = 10;    // ink gap between the date and the clock
+    // The weather bitmaps carry >= 2 blank rows at the bottom, so anchoring the
+    // 30 px cell at 36 keeps every icon's ink inside the panel (rain/showers
+    // reach row 63) and the row visually on the bottom edge.
+    const int wxTop = 36;
+    int dateH = 0;      // date ink height
+    int dateY = 0;
+    uint8_t dsize = 0;  // date scale, 0 while the date is hidden
     oled.setFont();
     oled.setTextSize(1);
     if (dateShown) {
@@ -698,10 +729,35 @@ static void renderIdle(const BambuState &st) {
       fmtClockDate(date, sizeof(date));
       int16_t dx1, dy1;
       uint16_t dw, dh;
+      dsize = 2;
+      oled.setTextSize(dsize);
       oled.getTextBounds(date, 0, 0, &dx1, &dy1, &dw, &dh);
-      oled.setCursor((OLED_WIDTH - (int)dw) / 2, 0);
+      if ((int)dw > OLED_WIDTH) {
+        dsize = 1;
+        oled.setTextSize(dsize);
+        oled.getTextBounds(date, 0, 0, &dx1, &dy1, &dw, &dh);
+      }
+      dateH = 7 * dsize;  // glyph rows; the cell's trailing row is blank
+      if (!wxShown) dateY = clkPairTop;
+      oled.setCursor((OLED_WIDTH - (int)dw) / 2, dateY);
       oled.print(date);
+      oled.setTextSize(1);
     }
+    int clkY;
+    if (!dateShown) {
+      clkY = wxShown ? 5 : 20;  // original anchors, date hidden
+    } else if (wxShown) {
+      // Center the clock ink between the date and the weather cell, nudged down
+      // 2 px: the icons carry blank rows on top, so the visible gap above and
+      // below the clock stays balanced.
+      clkY = dateH + (wxTop - dateH - clkInkH) / 2 + 2;
+    } else {
+      // Date + clock only: date near the top edge and a roomy 10 px ink gap
+      // under it, so the clock does not sit right below the date.
+      clkY = dateY + 6 * dsize + clkInkGap;
+    }
+    int wxIconY = dateShown ? wxTop : 32;
+    int wxTempY = dateShown ? wxTop + 8 : 40;
     oled.setTextSize(3);
     if (ntpOk()) {
       char clk[10];
@@ -731,20 +787,28 @@ static void renderIdle(const BambuState &st) {
     if (wxShown) {
       MonoWeatherData w;
       bool have = monoWeatherGet(w);
+      // °F is display-only: the API always returns metric, so a unit flip is
+      // just a repaint (monoFlags) and never needs another fetch.
       char tmp[8];
       if (have)
-        snprintf(tmp, sizeof(tmp), "%d", tempInt(w.tempC));
+        snprintf(tmp, sizeof(tmp), "%d", tempInt(monoSettings.weatherFahrenheit
+                                                     ? w.tempC * 9.0f / 5.0f + 32.0f
+                                                     : w.tempC));
       else
         snprintf(tmp, sizeof(tmp), "--");
       size_t n = strlen(tmp);
+      // A 3-digit reading ("100" in °F) runs the unit letter into the corner
+      // status icon at x=116, so the whole block shifts 4 px left.
+      int tx = (n >= 3) ? 56 : 60;
       oled.drawBitmap(23, wxIconY, monoWeatherIcon(have ? w.icon : ""),
                       MONO_WX_ICON_W, MONO_WX_ICON_H, SH110X_WHITE);
       oled.setTextSize(2);
-      oled.setCursor(60, wxTempY);
+      oled.setCursor(tx, wxTempY);
       oled.print(tmp);
-      oled.drawBitmap(60 + 2 + n * 12, wxTempY, monoDegreeBmp(), 8, 10, SH110X_WHITE);
-      oled.setCursor(60 + 2 + 9 + n * 12, wxTempY);
-      oled.print("C");
+      oled.drawBitmap(tx + 2 + n * 12, wxTempY, monoDegreeBmp(), 8, 10,
+                      SH110X_WHITE);
+      oled.setCursor(tx + 2 + 9 + n * 12, wxTempY);
+      oled.print(monoSettings.weatherFahrenheit ? "F" : "C");
     }
     oled.setFont();
     oled.setTextSize(1);
@@ -900,6 +964,7 @@ static uint16_t monoFlagsNow() {
   if (monoSettings.showHotIdle) f |= 0x40;
   if (monoSettings.showClockIdle) f |= 0x80;
   if (monoSettings.weatherEnabled) f |= 0x100;
+  if (monoSettings.weatherFahrenheit) f |= 0x800;  // unit flip repaints the idle temp
   if (!netSettings.use24h) f |= 0x200;  // 12h clock/end-time: repaint now
   if (!monoSettings.showStatusIdle) f |= 0x400;
   return f;

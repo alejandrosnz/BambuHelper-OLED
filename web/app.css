@@ -143,6 +143,8 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .nav-item[aria-current="true"] { background: var(--bg-elev); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm); }
 .nav-item[aria-current="true"]::before { content: ""; position: absolute; left: -3px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); }
 .sidebar-footer { margin-top: var(--sp-5); padding: var(--sp-3); font-size: 11px; color: var(--text-dim); font-family: var(--mono); border-top: 1px solid var(--line-soft); }
+.sidebar-footer a { color: var(--text-mid); text-decoration: none; border-bottom: 1px dotted var(--line); }
+.sidebar-footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* ============ Main ============ */
 .main { padding: var(--sp-6) var(--sp-7); max-width: 880px; width: 100%; }

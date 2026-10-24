@@ -262,7 +262,7 @@ struct NetworkSettings {
   uint8_t timezoneIndex;  // index into timezoneDatabase[]
   char timezoneStr[64];   // POSIX TZ string (e.g. "CET-1CEST,M3.5.0/02:00,M10.5.0/03:00")
   bool use24h;            // true = 24h format (default), false = 12h AM/PM
-  uint8_t dateFormat;     // 0=DD.MM.YYYY, 1=DD-MM-YYYY, 2=MM/DD/YYYY, 3=YYYY-MM-DD, 4=DD MMM YYYY, 5=MMM DD, YYYY
+  uint8_t dateFormat;     // 0=DD.MM.YYYY, 1=DD-MM-YYYY, 2=MM/DD/YYYY, 3=YYYY-MM-DD, 4=DD MMM YYYY, 5=MMM DD, YYYY, 6=DD MMM, 7=MMM DDth
   bool mdnsEnabled;       // advertise <hostname>.local over mDNS (default false)
   char hostname[32];      // mDNS/host label, sanitized [a-z0-9-], default "bambuhelper"
 };
@@ -393,6 +393,7 @@ struct MonoDisplaySettings {
   bool weatherEnabled;    // OpenWeatherMap on the idle clock (needs key + location)
   char weatherKey[65];    // OpenWeatherMap API key (32 hex chars)
   char weatherQuery[64];  // location query, e.g. "Madrid,ES" (no spaces)
+  bool weatherFahrenheit; // show the weather temperature in °F (API stays metric)
   uint8_t oledContrast;   // SH1106 contrast 0-255 (255 = max, the driver default)
 };
 
