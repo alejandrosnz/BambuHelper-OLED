@@ -56,6 +56,24 @@ static const int BAR_Y = 46;
 static const int BAR_H = 6;
 static const int BOTTOM_Y = 56;
 
+// Splash + boot/setup card anchors. The 9 pt title font is 174 px wide for
+// "BambuHelper-OLED" (192 px in the default font at size 2), so the whole repo
+// name never fits one big row: the splash stacks the two halves plus the
+// version in that font (18 px baselines) and the boot card keeps one size-1
+// row for the budget. Mirrored in tools/render_boot_preview.py.
+static const int SPLASH_TITLE_BASE = 19;  // "BambuHelper", ink 9..19
+static const int SPLASH_SUB_BASE = 37;    // "-OLED", ink 27..37
+static const int SPLASH_VER_BASE = 55;    // FW_VERSION, ink 44..55
+static const int BOOT_BRAND_Y = 0;
+static const int BOOT_RULE_Y = 9;   // hairline under the brand row
+static const int BOOT_NET_Y = 12;
+static const int BOOT_IP_Y = 21;
+static const int BOOT_LABEL_Y = 33;
+static const int BOOT_LIST_Y = 42;
+static const int BOOT_LIST_STEP = 9;     // 8 px cell + 1 px of air
+static const int BOOT_LIST_MAX_Y = 51;   // second printer row still ends at 57
+static const int BOOT_COLS = 21;         // default font: 6 px in 128 px
+
 static Adafruit_SH1106G oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 
 static bool s_enabled = true;
@@ -1235,7 +1253,17 @@ void monoDisplayInit() {
   // until the tick paints the clock (this message was the "splash" users saw
   // even with the toggle off).
   if (monoSettings.showSplash) {
-    monoShowMessage("BambuHelper", "Mono starting");
+    // Brand splash: both halves of the name plus the firmware, all in the
+    // wordmark font ("BambuHelper-OLED" would be 174 px on one row).
+    oled.clearDisplay();
+    oled.setFont(&FreeMonoBold9pt7b);
+    oled.setCursor(0, SPLASH_TITLE_BASE);
+    oled.print("BambuHelper");
+    oled.setCursor(0, SPLASH_SUB_BASE);
+    oled.print("-OLED");
+    oled.setCursor(0, SPLASH_VER_BASE);
+    oled.print(FW_VERSION);
+    oled.display();
   } else {
     oled.clearDisplay();
     oled.display();
@@ -1268,54 +1296,65 @@ void monoShowBoot() {
   s_lastBootDrawMs = millis();
 }
 
+// "WiFi: <ssid>" / "IP: <ip>" on one 21-column row: the tag is fixed, the
+// value takes the rest and is cut with ".." when it is longer.
+static String monoFitTag(const char *tag, const String &value) {
+  const int room = BOOT_COLS - (int)strlen(tag);
+  String v = value;
+  if ((int)v.length() > room) {
+    v = (room > 2) ? v.substring(0, room - 2) + ".." : v.substring(0, room);
+  }
+  return String(tag) + v;
+}
+
+// "<name> - on|off": the state suffix always survives, the name is cut.
+static String monoNameState(const String &name, bool live) {
+  const char *suffix = live ? " - on" : " - off";
+  const int room = BOOT_COLS - (int)strlen(suffix);
+  String s = name;
+  if ((int)s.length() > room) s = s.substring(0, room);
+  return s + suffix;
+}
+
 static void renderBootScreen() {
   oled.clearDisplay();
-  // All default font (21 chars/row): header, helper IP, section, names.
+  // One centred size-1 row: the big title font cannot hold the full repo name
+  // (174 px) and a two-line wordmark would cost both printer rows.
   oled.setFont();
   oled.setTextSize(1);
+  const char *brand = "BambuHelper-OLED";
+  oled.setCursor((OLED_WIDTH - (int)strlen(brand) * 6) / 2, BOOT_BRAND_Y);
+  oled.print(brand);
+  oled.drawFastHLine(0, BOOT_RULE_Y, OLED_WIDTH, SH110X_WHITE);
   bool ap = isAPMode();
-  String head = ap ? getAPSSID() : String("-- Bambu Helper --");
-  if (head.length() > 21) head = head.substring(0, 21);
-  oled.setCursor(0, 4);
-  oled.print(head);
+  String ssid = ap ? getAPSSID() : WiFi.SSID();
+  if (ssid.length() == 0) ssid = "--";
+  oled.setCursor(0, BOOT_NET_Y);
+  oled.print(monoFitTag(ap ? "AP: " : "WiFi: ", ssid));
   String hip = ap ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
   if (hip == "0.0.0.0") hip = "connecting";
-  String ipline = "IP: " + hip;
-  if (ipline.length() > 21) ipline = ipline.substring(0, 21);
-  oled.setCursor(0, 12);
-  oled.print(ipline);
-  oled.setCursor(0, 20);
-  oled.print("Printers:");
-  int y = 28;
-  int shown = 0;
-  for (uint8_t i = 0; i < MAX_PRINTERS && y <= 52; i++) {
+  oled.setCursor(0, BOOT_IP_Y);
+  oled.print(monoFitTag("IP: ", hip));
+  uint8_t configured = 0;
+  for (uint8_t i = 0; i < MAX_PRINTERS; i++)
+    if (isPrinterConfigured(i)) configured++;
+  oled.setCursor(0, BOOT_LABEL_Y);
+  oled.print(configured == 1 ? "Printer:" : "Printers:");
+  int y = BOOT_LIST_Y;
+  uint8_t shown = 0;
+  for (uint8_t i = 0; i < MAX_PRINTERS && y <= BOOT_LIST_MAX_Y; i++) {
     if (!isPrinterConfigured(i)) continue;
     String nm = monoPrinterLabel(i);
     if (nm.length() == 0) nm = String("Printer ") + (int)(i + 1);
-    if (nm.length() > 16) nm = nm.substring(0, 16);
-    nm += monoSlotLive(i) ? " [on]" : " [off]";
     oled.setCursor(0, y);
-    oled.print(nm);
-    y += 8;
+    oled.print(monoNameState(nm, monoSlotLive(i)));
+    y += BOOT_LIST_STEP;
     shown++;
   }
   if (shown == 0) {
-    oled.setCursor(0, 28);
-    oled.print("no printer");
+    oled.setCursor(0, BOOT_LIST_Y);
+    oled.print("none configured");
   }
-  oled.display();
-}
-
-void monoShowMessage(const char *line1, const char *line2) {
-  if (!s_booted || !s_enabled) return;
-  oled.clearDisplay();
-  oled.setFont(&FreeMonoBold9pt7b);
-  oled.setCursor(0, 15);
-  oled.print(line1 ? line1 : "");
-  oled.setFont();
-  oled.setTextSize(1);
-  oled.setCursor(0, 34);
-  oled.print(line2 ? line2 : "");
   oled.display();
 }
 
