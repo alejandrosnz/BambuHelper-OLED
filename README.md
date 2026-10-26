@@ -146,7 +146,7 @@ The portal only offers assets whose name starts with `BambuHelper-OLED-<board>-`
 | Printing | `RUNNING` | 2-line job title, `%` + layer, progress bar, current stage + remaining time / ETA |
 | Pause | `PAUSE` | Same layout with a pause icon and blinking progress fill |
 | Done | `FINISH` | 2-line title, boxed `DONE`, optional cooldown temps; returns to the idle screen after the configured Done duration (default ~3 min, `0` = until the next print) |
-| Error | `FAILED` / print error | `ERR`, code/state and job name |
+| Error | `FAILED` / print error | Job name as the title (marquee when long), worst HMS code in the Bambu `0300-1A00-0002-0002` format (`0300-8007` for a bare print error), severity word (`FATAL` / `SERIOUS` / `COMMON`) with `+N more` when codes were dropped |
 | Idle / screensaver | Printer idle | Date line on the top edge, big clock in the middle, weather icon + temperature on the bottom edge (or big temps when the clock is off), status icon (X / circle), optional `HOT` warning |
 
 - Static screens refresh once per second; marquee and blink run at ~10 fps.
