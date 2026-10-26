@@ -885,21 +885,68 @@ static void renderIdle(const BambuState &st) {
   oled.display();
 }
 
+#if HAS_HMS_UI
+// The FAILED screen code row: the worst HMS entry as Bambu writes it - four
+// 4-digit groups ("HMS_0300-1A00-0002-0002" without the prefix, 19 ch = 114 px
+// of the 128 px row). t is paste-ready for a Bambu wiki search (issue #164).
+// A bare print_error is a 32-bit HMI code, printed as "0300-8007". hms[] is
+// sorted worst-first, so hms[0] is the headline entry.
+static void hmsCodeText(const BambuState &st, char *buf, size_t n) {
+  if (st.hmsCount > 0)
+    snprintf(buf, n, "%04lX-%04lX-%04lX-%04lX",
+             (unsigned long)(st.hms[0].attr >> 16),
+             (unsigned long)(st.hms[0].attr & 0xFFFFUL),
+             (unsigned long)(st.hms[0].code >> 16),
+             (unsigned long)(st.hms[0].code & 0xFFFFUL));
+  else
+    snprintf(buf, n, "%04lX-%04lX", (unsigned long)(st.printError >> 16),
+             (unsigned long)(st.printError & 0xFFFFUL));
+}
+#endif
+
 static void renderFailed(const BambuState &st) {
   oled.clearDisplay();
-  monoDrawTitle(String("ERR"));
+  // The failing job is the headline (marquee when long, like Offline), the
+  // code row is the identifier above, and the severity word says how bad it
+  // is. "Error" in the title row would only repeat the bottom label.
+  String name = monoCleanJobName(jobDisplayName(st));
+  monoDrawTitle(name.length() > 0 ? name : String("Error"));
   oled.setCursor(0, TEMP_Y);
 #if HAS_HMS_UI
-  char buf[24];
-  snprintf(buf, sizeof(buf), "code %08X", (unsigned)st.printError);
+  char buf[20];
+  hmsCodeText(st, buf, sizeof(buf));
   oled.print(buf);
+
+  oled.setCursor(0, LAYER_Y);
+  if (st.hmsCount > 0) {
+    // Severity is the high half of the code (bambu_state.h): 1 fatal, 2
+    // serious, 3 common, everything else unknown (listed, never alerts).
+    switch (st.hmsWorstSeverity) {
+      case 1:  oled.print(F("FATAL"));    break;
+      case 2:  oled.print(F("SERIOUS"));  break;
+      case 3:  oled.print(F("COMMON"));   break;
+      default: oled.print(F("UNKNOWN"));  break;
+    }
+    if (st.hmsTotal > st.hmsCount) {
+      // Right-aligned above the reserved (0,56) status-icon row: the panel
+      // lists only the worst entry, so the count says what got dropped.
+      char more[12];
+      snprintf(more, sizeof(more), "+%u more",
+               (unsigned)(st.hmsTotal - st.hmsCount));
+      int16_t mx1, my1;
+      uint16_t mw, mh;
+      oled.getTextBounds(more, 0, 0, &mx1, &my1, &mw, &mh);
+      oled.setCursor(128 - (int)mw, LAYER_Y);
+      oled.print(more);
+    }
+  } else {
+    oled.print(F("print error"));
+  }
 #else
   oled.print(st.gcodeState);
-#endif
   oled.setCursor(0, LAYER_Y);
-  String name = monoCleanJobName(jobDisplayName(st));
-  if (name.length() > 21) name = name.substring(0, 18) + "...";
-  oled.print(name);
+  oled.print(name.length() > 0 ? name : String("--"));
+#endif
   monoDrawStatusIcon(0, BOTTOM_Y, MONO_SCR_FAILED);
   oled.setCursor(11, BOTTOM_Y);
   oled.print("error");
@@ -960,6 +1007,9 @@ struct MonoSig {
   unsigned total;
   int nzl, nzlT, bed, bedT;
   unsigned long err;
+  unsigned hmsAttr, hmsCode;  // worst HMS entry: the FAILED rows repaint on it
+  uint8_t hmsN;               // codes kept in hms[] ("+%u more" count)
+  uint8_t hmsTot;             // codes described ("+%u more" value)
   bool connected;
   char job[128];  // full clean-name cap (subtaskName[128]); must track, or a
                   // renamed job that shares its prefix never repaints
@@ -1006,8 +1056,16 @@ static MonoSig makeSig(MonoScreen scr, MonoScreen rawScr, const BambuState &st) 
   s.bedT = tempInt(st.bedTarget);
 #if HAS_HMS_UI
   s.err = st.printError;
+  s.hmsAttr = st.hmsCount > 0 ? st.hms[0].attr : 0;
+  s.hmsCode = st.hmsCount > 0 ? st.hms[0].code : 0;
+  s.hmsN = st.hmsCount;
+  s.hmsTot = st.hmsTotal;
 #else
   s.err = 0;
+  s.hmsAttr = 0;
+  s.hmsCode = 0;
+  s.hmsN = 0;
+  s.hmsTot = 0;
 #endif
   s.connected = st.connected;
   String j = monoCleanJobName(jobDisplayName(st));
@@ -1043,6 +1101,8 @@ static bool sigSame(const MonoSig &a, const MonoSig &b) {
          a.remaining == b.remaining && a.layer == b.layer && a.total == b.total &&
          a.nzl == b.nzl && a.nzlT == b.nzlT && a.bed == b.bed && a.bedT == b.bedT &&
          a.err == b.err && a.connected == b.connected && strcmp(a.job, b.job) == 0 &&
+         a.hmsAttr == b.hmsAttr && a.hmsCode == b.hmsCode &&
+         a.hmsN == b.hmsN && a.hmsTot == b.hmsTot &&
          a.clockMin == b.clockMin &&
          a.dateFmt == b.dateFmt && a.hideDate == b.hideDate &&
          a.printTimeAlt == b.printTimeAlt &&
@@ -1145,8 +1205,15 @@ static void mockBuild(int idx, BambuState &o) {
       o.printing = false;
       strlcpy(o.subtaskName, "Failed_part", sizeof(o.subtaskName));
 #if HAS_HMS_UI
+      // One real-shaped entry + a described tail, so mock 5 exercises the
+      // full row set: 4-group code, severity word and the "+1 more" count.
       o.printError = 0x03008007UL;
       o.printErrorSeen = true;
+      o.hms[0] = { 0x03001A00UL, 0x00010002UL };  // severity 1 = fatal
+      o.hmsCount = 1;
+      o.hmsTotal = 2;
+      o.hmsOverflow = true;
+      o.hmsWorstSeverity = 1;
 #endif
       o.nozzleTemp = 180;
       o.bedTemp = 50;
