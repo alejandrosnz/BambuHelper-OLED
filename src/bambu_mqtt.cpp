@@ -1671,8 +1671,17 @@ static void reconnectConn(MqttConn& c) {
   } else if (c.consecutiveFails >= BAMBU_BACKOFF_PHASE1) {
     interval = BAMBU_BACKOFF_PHASE2_MS;
   }
-  // Powered-off printer: the TCP probe never reaches a broker, so no backoff
-  if (c.printerUnreachable) interval = BAMBU_OFFLINE_PROBE_MS;
+  // Powered-off printer: TCP probe interval backs off exponentially with the
+  // number of consecutive probe failures (5s -> 10 -> 20 -> 30s cap), so a
+  // printer that stays off stops hammering the network after the first few
+  // probes. Reset on the first successful probe (see below).
+  if (c.printerUnreachable) {
+    uint16_t f = c.diag.probeFails;
+    if (f <= 1)      interval = 5000;
+    else if (f == 2) interval = 10000;
+    else if (f == 3) interval = 20000;
+    else             interval = 30000;
+  }
 
   // First attempt is immediate; subsequent attempts respect the interval
   if (c.diag.lastAttemptMs && now - c.lastReconnectAttempt < interval) return;
@@ -1702,27 +1711,33 @@ static void reconnectConn(MqttConn& c) {
   }
   if (c.mqtt->connected()) return;
 
-  // TCP reachability test (local mode only)
+  // TCP reachability test (local mode only).
+  // connect(host, port, timeout_ms) in this core uses timeout_ms as the select()
+  // timeout for the non-blocking connect() (WiFiClient::connect): it bounds the
+  // whole attempt, including the initial SYN retry (~1 s). 600 ms was shorter
+  // than that retry, so a single lost SYN made a live printer look unreachable
+  // for the whole probe interval. 1500 ms covers the SYN retry with margin.
+  // setTimeout() only matters for connect() calls that omit the timeout argument
+  // (it sets _timeout); this call passes an explicit timeout, so setTimeout()
+  // does not cap it. With the printer powered off the connect always exhausts
+  // the full timeout, stalling the main loop for that long on every probe; the
+  // exponential backoff above keeps that stall rare after the first few fails.
   if (cfg.mode == CONN_LOCAL) {
     WiFiClient tcp;
-    // 600 ms bounds connect() itself (its third argument is the select timeout;
-    // setTimeout() only sets read/write timeouts, so the old setTimeout(1) here
-    // never capped the connect). Not shorter: with modem sleep on, the SYN/ACK
-    // can take up to one DTIM (~300 ms) and a false "unreachable" would cost a
-    // whole probe interval. This runs in the main loop task, so the old 1 s
-    // timeout was a visible 1 s web-server stall every probe.
     MQTT_LOG("[%d] TCP test to %s:%d...", c.slotIndex, cfg.ip, BAMBU_PORT);
     unsigned long tcpT0 = millis();
-    c.diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT, 600);
+    c.diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT, 1500);
     MQTT_LOG("[%d] TCP test %s in %lums", c.slotIndex, c.diag.tcpOk ? "OK" : "FAILED", millis() - tcpT0);
     tcp.stop();
     c.printerUnreachable = !c.diag.tcpOk;
     if (!c.diag.tcpOk) {
       MQTT_LOG("[%d] Printer not reachable on network!", c.slotIndex);
       c.diag.probes++;
+      c.diag.probeFails++;
       c.diag.lastRc = -2;
       return;
     }
+    c.diag.probeFails = 0;
   } else {
     c.diag.tcpOk = true;
     c.printerUnreachable = false;
@@ -1763,6 +1778,8 @@ static void reconnectConn(MqttConn& c) {
   }
 
   if (connected) {
+    c.diag.probeFails = 0;
+    c.printerUnreachable = false;
     char topic[64];
     snprintf(topic, sizeof(topic), "device/%s/report", cfg.serial);
     if (!c.mqtt->subscribe(topic)) {

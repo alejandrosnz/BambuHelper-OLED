@@ -614,7 +614,10 @@ static void handleTimezones() {
   // seconds, and the whole server was stuck inside the handler meanwhile.
   // /api/timezones is fetched on every portal load, so it gated the page.
   String json;
-  json.reserve(96 + tzCount * 48);
+  if (!json.reserve(96 + tzCount * 48)) {
+    server.send(500, "text/plain", "Out of memory");
+    return;
+  }
   json += "{\"selected\":";
   json += String((int)netSettings.timezoneIndex);
   json += ",\"zones\":[";
@@ -681,6 +684,7 @@ static void handleDebug() {
       p["rc_hint"] = "Token expired or invalidated (90-day TTL, or 'log out everywhere'/password change). Paste a fresh token in Setup.";
     }
     p["tcp_ok"] = d.tcpOk;
+    p["probe_fails"] = d.probeFails;
     p["pushall_total"] = d.pushallTotal;
     p["rec_print"] = d.recoveryPrint;
     p["rec_conn_dead"] = d.recoveryConnDead;
@@ -950,53 +954,68 @@ static void handleToggleSetting() {
 const char* webAssetCssVersion() { return WEB_APP_CSS_VER; }
 const char* webAssetJsVersion()  { return WEB_APP_JS_VER; }
 
+// Log macro for the web server (mirrors MQTT_LOG).
+#define WEB_LOG(fmt, ...) do { if (mqttDebugLog) Serial.printf(fmt "\n", ##__VA_ARGS__); } while (0)
+
 // Push a body until every byte is out.
 //
-// WiFiClient::write() hands the whole buffer to lwIP, which only accepts what
-// fits in its ~5.7 KB send buffer and then waits (select, 1 s at a time) for
-// ACKs to free room. It gives up after 10 consecutive timeouts and returns a
-// SHORT count - and WebServer::send_P() ignores that count. A 31 KB app.js went
-// out with fewer bytes than the Content-Length it had just declared, and the
-// browser reported net::ERR_CONTENT_LENGTH_MISMATCH (200 OK), then retried the
-// asset. Slicing keeps each write inside the send buffer (so it usually returns
-// at once) and lets us resume the remainder instead of dropping it.
-static void writeBody(WiFiClient& c, const uint8_t* data, size_t len) {
-  static const size_t SLICE = 2048;
+// WiFiClient::write() (this core) does not hand the whole buffer to lwIP in one
+// shot: it loops up to WIFI_CLIENT_MAX_WRITE_RETRY (10) times, each gated by a
+// 1 s select() on the socket, calling send() with MSG_DONTWAIT, and returns a
+// SHORT count as soon as a send() fails with anything other than EAGAIN or the
+// retries run out. WebServer::send_P() ignores that short count, so a 31 KB
+// app.js went out with fewer bytes than the Content-Length it had just declared
+// and the browser reported net::ERR_CONTENT_LENGTH_MISMATCH. The usual trigger
+// is not the modem sleeping (DTIM ACKs land well inside the 10 s retry window);
+// it is send() returning EAGAIN/ENOMEM outright under pbuf/heap pressure with
+// TLS active, which burns all 10 retries in microseconds. Slicing to 2 KB keeps
+// each write small, but the real fix is to resume after a short write instead of
+// dropping the remainder: a short count is not a dead connection, just a full
+// send buffer, and the next write() re-enters the retry loop fresh.
+static bool writeBody(WiFiClient& c, const uint8_t* data, size_t len) {
+  static const size_t        SLICE          = 2048;
+  static const unsigned long NO_PROGRESS_MS = 8000;   // sin avanzar ni un byte
+  static const unsigned long TOTAL_MS       = 20000;  // tope duro de toda la escritura
+
+  const unsigned long t0 = millis();
+  unsigned long lastProgress = t0;
   size_t off = 0;
-  unsigned long lastProgress = millis();
+  uint16_t shortWrites = 0;
+
   while (off < len) {
+    unsigned long now = millis();
+    // Los topes se comprueban SIEMPRE, no solo cuando w == 0,
+    // para que un cliente que gotea bytes no retenga el loop principal.
+    if (now - t0 > TOTAL_MS || now - lastProgress > NO_PROGRESS_MS || !c.connected()) {
+      WEB_LOG("web: body aborted at %u/%u B after %lu ms (short=%u, writeErr=%d)",
+              (unsigned)off, (unsigned)len, now - t0, shortWrites, c.getWriteError());
+      return false;
+    }
     size_t n = len - off;
     if (n > SLICE) n = SLICE;
     size_t w = c.write(data + off, n);
     if (w > 0) {
+      if (w < n) shortWrites++;
       off += w;
       lastProgress = millis();
       continue;
     }
-    // Nothing moved: either the peer is gone or the link stalled past any
-    // plausible ACK cadence (DTIM sleep tops out around a second).
-    if (!c.connected() || millis() - lastProgress > 20000) {
-      Serial.printf("web: body stalled at %u/%u B\n", (unsigned)off, (unsigned)len);
-      return;
-    }
-    delay(1);  // let the WiFi/lwIP tasks run, then try the rest
+    shortWrites++;
+    delay(1);
   }
+  if (shortWrites) WEB_LOG("web: body ok, %u short writes, %lu ms", shortWrites, millis() - t0);
+  return true;
 }
 
 static void sendGzipAsset(const char* contentType, const uint8_t* data, size_t len) {
-  WiFiClient c = server.client();
-  // Nagle off: the asset goes out as a burst instead of waiting an ACK round
-  // trip per TCP segment. Matters most when the radio is asleep - see the long
-  // note in handleTimezones().
+  WiFiClient c = server.client();      // server.client() returns by value in this core
   c.setNoDelay(true);
   server.sendHeader("Content-Encoding", "gzip");
   server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
-  // Declare the length up front and stream the body ourselves: setContentLength()
-  // is what _prepareHeader() uses once send() carries an empty body, and
-  // send_P() would write the whole asset in one WiFiClient::write() (see above).
   server.setContentLength(len);
   server.send(200, contentType, "");
-  writeBody(c, data, len);
+  if (server.method() == HTTP_HEAD) return;   // no escribir body en HEAD
+  if (!writeBody(c, data, len)) c.stop();     // fallar rápido, que el navegador reintente
 }
 
 static void handleAppCss() { sendGzipAsset("text/css", WEB_APP_CSS_GZ, WEB_APP_CSS_GZ_LEN); }
