@@ -1705,10 +1705,15 @@ static void reconnectConn(MqttConn& c) {
   // TCP reachability test (local mode only)
   if (cfg.mode == CONN_LOCAL) {
     WiFiClient tcp;
-    tcp.setTimeout(1);
+    // 600 ms bounds connect() itself (its third argument is the select timeout;
+    // setTimeout() only sets read/write timeouts, so the old setTimeout(1) here
+    // never capped the connect). Not shorter: with modem sleep on, the SYN/ACK
+    // can take up to one DTIM (~300 ms) and a false "unreachable" would cost a
+    // whole probe interval. This runs in the main loop task, so the old 1 s
+    // timeout was a visible 1 s web-server stall every probe.
     MQTT_LOG("[%d] TCP test to %s:%d...", c.slotIndex, cfg.ip, BAMBU_PORT);
     unsigned long tcpT0 = millis();
-    c.diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT);
+    c.diag.tcpOk = tcp.connect(cfg.ip, BAMBU_PORT, 600);
     MQTT_LOG("[%d] TCP test %s in %lums", c.slotIndex, c.diag.tcpOk ? "OK" : "FAILED", millis() - tcpT0);
     tcp.stop();
     c.printerUnreachable = !c.diag.tcpOk;

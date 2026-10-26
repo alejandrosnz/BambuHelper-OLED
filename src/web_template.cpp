@@ -4,9 +4,9 @@
 //  PROGMEM string literals (PAGE_HTML, PAGE_AP_HTML) are defined in
 //  include/web_pages.h, which is included only here.
 //
-//  serveMainPage() streams PAGE_HTML in 2 KB chunks via HTTP chunked transfer,
+//  serveMainPage() streams PAGE_HTML in 4 KB chunks via HTTP chunked transfer,
 //  substituting %FOO% placeholders inline. Peak heap during page render is the
-//  2 KB buffer plus any per-placeholder String allocation - typically <3 KB.
+//  4 KB buffer plus any per-placeholder String allocation - typically <5 KB.
 //
 //  serveApPage() sends the small AP-mode page verbatim. No substitution.
 // =============================================================================
@@ -639,9 +639,9 @@ static bool resolvePlaceholder(const char* name, String& out) {
 
 // ---------------------------------------------------------------------------
 //  Stream the HTML template from PROGMEM, resolving placeholders on the fly.
-//  All output (literal HTML + placeholder values) goes into a single 2 KB
+//  All output (literal HTML + placeholder values) goes into a single 4 KB
 //  buffer; sendContent() flushes only when full, minimizing TCP writes.
-//  Peak heap during render is the 2 KB buffer plus any per-placeholder String.
+//  Peak heap during render is the 4 KB buffer plus any per-placeholder String.
 // ---------------------------------------------------------------------------
 // One piece of the page. The page is split so a board without the printer-error
 // feature never links its markup; the pieces stream back to back into a single
@@ -652,7 +652,7 @@ struct TemplateSegment {
 };
 
 static void streamTemplate(const TemplateSegment* segs, uint8_t segCount) {
-  static const size_t BUF_SIZE = 2048;
+  static const size_t BUF_SIZE = 4096;
   char* buf = (char*)malloc(BUF_SIZE + 1);
   if (!buf) {
     server.send(503, "text/plain", "Out of memory");
@@ -662,9 +662,14 @@ static void streamTemplate(const TemplateSegment* segs, uint8_t segCount) {
 
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  // Nagle off. Each flush is three writes in chunked mode (size line, payload,
+  // CRLF); with Nagle on, the size line and the CRLF each waited for the
+  // previous segment's ACK, so the page crawled whenever the modem was in DTIM
+  // sleep (printer off = no MQTT traffic keeping it awake).
+  server.client().setNoDelay(true);
   server.send(200, "text/html", "");
 
-  // A stalled client turns every 2 KB flush into a ~1 s trickle, holding the
+  // A stalled client turns every 4 KB flush into a ~1 s trickle, holding the
   // main loop (MQTT, display) for minutes. One slow flush is a lost segment on
   // weak WiFi and the page must survive it; a stall is a dropped connection,
   // three slow flushes in a row, or a page still not out after 30 s.

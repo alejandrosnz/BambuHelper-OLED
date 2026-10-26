@@ -603,28 +603,34 @@ static void handleReboot() {
 static void handleTimezones() {
   size_t tzCount;
   const TimezoneRegion* regions = getSupportedTimezones(&tzCount);
-  // Stream JSON directly to avoid building large String
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
-  server.sendContent("{\"selected\":");
-  server.sendContent(String((int)netSettings.timezoneIndex));
-  server.sendContent(",\"zones\":[");
+  // One String, one response - not one sendContent() per zone.
+  //
+  // Chunked sendContent() costs three TCP writes per call (size line, payload,
+  // CRLF - WebServer.cpp). For 45 zones that was ~290 writes, almost all of
+  // them a handful of bytes. The accepted socket has Nagle on (WiFiServer
+  // defaults _noDelay=false), so every small write waited for the previous ACK.
+  // With the radio awake that was ~2 s; with it asleep - printer off, no MQTT
+  // traffic keeping the modem out of DTIM sleep - ~150 ms per ACK, i.e. tens of
+  // seconds, and the whole server was stuck inside the handler meanwhile.
+  // /api/timezones is fetched on every portal load, so it gated the page.
+  String json;
+  json.reserve(96 + tzCount * 48);
+  json += "{\"selected\":";
+  json += String((int)netSettings.timezoneIndex);
+  json += ",\"zones\":[";
   for (size_t i = 0; i < tzCount; i++) {
-    if (i > 0) server.sendContent(",");
-    // JSON-escape the label into a stack buffer (defensive - current labels are clean)
-    char esc[80];
-    size_t j = 0;
-    esc[j++] = '"';
-    for (const char* p = regions[i].name; *p && j < sizeof(esc) - 2; p++) {
-      if (*p == '"' || *p == '\\') esc[j++] = '\\';
-      esc[j++] = *p;
+    if (i > 0) json += ',';
+    // Labels are clean ASCII today; the escape keeps the JSON valid anyway.
+    json += '"';
+    for (const char* p = regions[i].name; *p; p++) {
+      if (*p == '"' || *p == '\\') json += '\\';
+      json += *p;
     }
-    esc[j++] = '"';
-    esc[j] = '\0';
-    server.sendContent(esc);
+    json += '"';
   }
-  server.sendContent("]}");
-  server.sendContent("");  // terminate chunked response
+  json += "]}";
+  server.client().setNoDelay(true);
+  server.send(200, "application/json", json);
 }
 
 static void handleReset() {
@@ -944,10 +950,53 @@ static void handleToggleSetting() {
 const char* webAssetCssVersion() { return WEB_APP_CSS_VER; }
 const char* webAssetJsVersion()  { return WEB_APP_JS_VER; }
 
+// Push a body until every byte is out.
+//
+// WiFiClient::write() hands the whole buffer to lwIP, which only accepts what
+// fits in its ~5.7 KB send buffer and then waits (select, 1 s at a time) for
+// ACKs to free room. It gives up after 10 consecutive timeouts and returns a
+// SHORT count - and WebServer::send_P() ignores that count. A 31 KB app.js went
+// out with fewer bytes than the Content-Length it had just declared, and the
+// browser reported net::ERR_CONTENT_LENGTH_MISMATCH (200 OK), then retried the
+// asset. Slicing keeps each write inside the send buffer (so it usually returns
+// at once) and lets us resume the remainder instead of dropping it.
+static void writeBody(WiFiClient& c, const uint8_t* data, size_t len) {
+  static const size_t SLICE = 2048;
+  size_t off = 0;
+  unsigned long lastProgress = millis();
+  while (off < len) {
+    size_t n = len - off;
+    if (n > SLICE) n = SLICE;
+    size_t w = c.write(data + off, n);
+    if (w > 0) {
+      off += w;
+      lastProgress = millis();
+      continue;
+    }
+    // Nothing moved: either the peer is gone or the link stalled past any
+    // plausible ACK cadence (DTIM sleep tops out around a second).
+    if (!c.connected() || millis() - lastProgress > 20000) {
+      Serial.printf("web: body stalled at %u/%u B\n", (unsigned)off, (unsigned)len);
+      return;
+    }
+    delay(1);  // let the WiFi/lwIP tasks run, then try the rest
+  }
+}
+
 static void sendGzipAsset(const char* contentType, const uint8_t* data, size_t len) {
+  WiFiClient c = server.client();
+  // Nagle off: the asset goes out as a burst instead of waiting an ACK round
+  // trip per TCP segment. Matters most when the radio is asleep - see the long
+  // note in handleTimezones().
+  c.setNoDelay(true);
   server.sendHeader("Content-Encoding", "gzip");
   server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
-  server.send_P(200, contentType, (PGM_P)data, len);
+  // Declare the length up front and stream the body ourselves: setContentLength()
+  // is what _prepareHeader() uses once send() carries an empty body, and
+  // send_P() would write the whole asset in one WiFiClient::write() (see above).
+  server.setContentLength(len);
+  server.send(200, contentType, "");
+  writeBody(c, data, len);
 }
 
 static void handleAppCss() { sendGzipAsset("text/css", WEB_APP_CSS_GZ, WEB_APP_CSS_GZ_LEN); }
