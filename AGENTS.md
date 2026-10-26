@@ -58,8 +58,9 @@ The build must end in `SUCCESS` and show RAM/flash usage. On the C3, hold
 There is no unit-test suite. The gates are:
 
 1. `pio run` compiles and the image still fits.
-2. `tools/render_idle_preview.py` for idle-screen layout work and
-   `tools/render_status_preview.py` for printing/pause/done.
+2. `tools/render_idle_preview.py` for idle-screen layout work,
+   `tools/render_status_preview.py` for printing/pause/done and
+   `tools/render_boot_preview.py` for the splash + boot/setup card.
 3. On-device check through the serial `mock` commands (below).
 
 ### Mock mode (no printer needed)
@@ -97,6 +98,7 @@ This is the only way to see the real panel without a printer.
 | `tools/oled_preview.py` | Shared preview layer: fonts, GFX canvas, PNG sheets |
 | `tools/render_idle_preview.py` | Pixel preview of the idle screen |
 | `tools/render_status_preview.py` | Pixel preview of the printing/pause/done screens |
+| `tools/render_boot_preview.py` | Pixel preview of the brand splash + boot/setup card |
 | `tools/release.py` | OTA packaging + slot-size check |
 | `img/preview/` | Committed preview snapshots (regenerate after layout changes) |
 | `include/config.h` | `FW_VERSION`, board/feature defaults |
@@ -172,7 +174,12 @@ path for any new setting.
 - Default font: 5x7 glyph in a 6x8 cell. `setTextSize(s)` scales both; advance is
   `6*s` px per char, visible glyph height `7*s`, cell height `8*s` (last row
   blank).
-- `FreeMonoBold9pt7b` (titles) is a real GFX font: cursor y is the baseline.
+- `FreeMonoBold9pt7b` (titles) is a real GFX font: cursor y is the baseline, and
+  it descends to baseline+4 (`Helper`), so a row of it needs 15 px, not 11.
+- `FreeMonoBold9pt7b` is ~10.8 px/char: **11 characters** is the most that fits
+  128 px (`BambuHelper` = 119, `BambuHelper-OLED` = 174). The repo name never
+  fits one big row; the default font at size 2 needs 12 px/char, so it does not
+  fit either (`BambuHelper` = 132).
 - Useful sizes: size 1 = 7 px glyph, size 2 = 14 px, size 3 = 21 px (the big
   clock). At size 2 only **10 characters** fit (120 px); at size 1, 21.
 - Weather icons are 30x30 but the bitmaps include blank padding rows top/bottom;
@@ -202,9 +209,26 @@ With the date visible but the weather off, the date sits near the top edge
 With the date hidden the original anchors are frozen: clock `y=5` (weather on) or
 `y=20` (weather off), icon `y=32`, temp `y=40`. Do not move them.
 
+Splash (brand) and boot/setup card:
+
+```
+splash  BambuHelper / -OLED / FW_VERSION, all FreeMonoBold9pt7b,
+        baselines 19 / 37 / 55 (ink 9..19, 27..37, 44..55)
+card    "BambuHelper-OLED"  size 1, centred (x=16), y=0   ink 0..6
+        rule                y=9
+        WiFi: <ssid>        y=12    (AP: <ssid> in setup mode)
+        IP: <ip>            y=21    ("connecting" before DHCP)
+        Printer(s):         y=33    (2 px of extra air under the network block)
+        rows                y=42 + 9 per row -> 2 printers (42..48, 51..57)
+```
+
+The card keeps the repo name on one size-1 row on purpose: a big two-line
+wordmark costs 23 px and leaves room for a single printer. With the 9 px step
+only two printer rows fit below the label (42..48, 51..57).
+
 ## Previewing the layout
 
-Both preview tools share `tools/oled_preview.py`: the **real** `glcdfont.c` and
+The preview tools share `tools/oled_preview.py`: the **real** `glcdfont.c` and
 `FreeMonoBold9pt7b` loaders from `.pio/libdeps`, an Adafruit_GFX subset
 (default + GFX fonts, bitmaps, lines, circles, `getTextBounds`), the XBM reader
 and the captioned PNG sheet writer (standard library only, no Pillow). They
@@ -259,6 +283,23 @@ python tools/render_status_preview.py --scale 6 --cols 2
 - Curated done sheet: temps off/on, targets 0 vs set, 3-digit values, 1-line /
   2-line / overflow titles and a non-Latin (empty) title.
 
+`tools/render_boot_preview.py` replays the brand splash (`monoDisplayInit`)
+and `renderBootScreen()` with the same fonts: the splash on its own panel plus
+STA/AP/connecting/no-printer/long-SSID/long-name states. It prints how many
+configured printers actually fit (the card shows two; a third is reported as
+`(2 shown)`, not as an error).
+
+```bash
+python tools/render_boot_preview.py                  # splash + card -> preview/boot.png
+python tools/render_boot_preview.py --no-splash
+python tools/render_boot_preview.py --scale 6 --cols 2
+```
+
+- The boot card has no `mock` case: it paints on every power-on, so it is
+  checked on hardware by rebooting.
+- Constants are mirrored (and drift-checked) from the `SPLASH_*`/`BOOT_*` block
+  at the top of `src/mono_display.cpp`.
+
 ### Committed snapshots (`img/preview/`)
 
 The approved sheets are kept in `img/preview/` so a layout can be checked
@@ -268,6 +309,7 @@ them in the same commit:
 ```bash
 python tools/render_idle_preview.py --out img/preview/idle.png
 python tools/render_status_preview.py --out-dir img/preview   # printing.png + done.png
+python tools/render_boot_preview.py --out img/preview/boot.png
 ```
 
 - `preview/` is git-ignored scratch space; `img/preview/` is the committed set.

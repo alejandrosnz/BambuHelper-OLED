@@ -56,6 +56,24 @@ static const int BAR_Y = 46;
 static const int BAR_H = 6;
 static const int BOTTOM_Y = 56;
 
+// Splash + boot/setup card anchors. The 9 pt title font is 174 px wide for
+// "BambuHelper-OLED" (192 px in the default font at size 2), so the whole repo
+// name never fits one big row: the splash stacks the two halves plus the
+// version in that font (18 px baselines) and the boot card keeps one size-1
+// row for the budget. Mirrored in tools/render_boot_preview.py.
+static const int SPLASH_TITLE_BASE = 19;  // "BambuHelper", ink 9..19
+static const int SPLASH_SUB_BASE = 37;    // "-OLED", ink 27..37
+static const int SPLASH_VER_BASE = 55;    // FW_VERSION, ink 44..55
+static const int BOOT_BRAND_Y = 0;
+static const int BOOT_RULE_Y = 9;   // hairline under the brand row
+static const int BOOT_NET_Y = 12;
+static const int BOOT_IP_Y = 21;
+static const int BOOT_LABEL_Y = 33;
+static const int BOOT_LIST_Y = 42;
+static const int BOOT_LIST_STEP = 9;     // 8 px cell + 1 px of air
+static const int BOOT_LIST_MAX_Y = 51;   // second printer row still ends at 57
+static const int BOOT_COLS = 21;         // default font: 6 px in 128 px
+
 static Adafruit_SH1106G oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 
 static bool s_enabled = true;
@@ -867,21 +885,68 @@ static void renderIdle(const BambuState &st) {
   oled.display();
 }
 
+#if HAS_HMS_UI
+// The FAILED screen code row: the worst HMS entry as Bambu writes it - four
+// 4-digit groups ("HMS_0300-1A00-0002-0002" without the prefix, 19 ch = 114 px
+// of the 128 px row). t is paste-ready for a Bambu wiki search (issue #164).
+// A bare print_error is a 32-bit HMI code, printed as "0300-8007". hms[] is
+// sorted worst-first, so hms[0] is the headline entry.
+static void hmsCodeText(const BambuState &st, char *buf, size_t n) {
+  if (st.hmsCount > 0)
+    snprintf(buf, n, "%04lX-%04lX-%04lX-%04lX",
+             (unsigned long)(st.hms[0].attr >> 16),
+             (unsigned long)(st.hms[0].attr & 0xFFFFUL),
+             (unsigned long)(st.hms[0].code >> 16),
+             (unsigned long)(st.hms[0].code & 0xFFFFUL));
+  else
+    snprintf(buf, n, "%04lX-%04lX", (unsigned long)(st.printError >> 16),
+             (unsigned long)(st.printError & 0xFFFFUL));
+}
+#endif
+
 static void renderFailed(const BambuState &st) {
   oled.clearDisplay();
-  monoDrawTitle(String("ERR"));
+  // The failing job is the headline (marquee when long, like Offline), the
+  // code row is the identifier above, and the severity word says how bad it
+  // is. "Error" in the title row would only repeat the bottom label.
+  String name = monoCleanJobName(jobDisplayName(st));
+  monoDrawTitle(name.length() > 0 ? name : String("Error"));
   oled.setCursor(0, TEMP_Y);
 #if HAS_HMS_UI
-  char buf[24];
-  snprintf(buf, sizeof(buf), "code %08X", (unsigned)st.printError);
+  char buf[20];
+  hmsCodeText(st, buf, sizeof(buf));
   oled.print(buf);
+
+  oled.setCursor(0, LAYER_Y);
+  if (st.hmsCount > 0) {
+    // Severity is the high half of the code (bambu_state.h): 1 fatal, 2
+    // serious, 3 common, everything else unknown (listed, never alerts).
+    switch (st.hmsWorstSeverity) {
+      case 1:  oled.print(F("FATAL"));    break;
+      case 2:  oled.print(F("SERIOUS"));  break;
+      case 3:  oled.print(F("COMMON"));   break;
+      default: oled.print(F("UNKNOWN"));  break;
+    }
+    if (st.hmsTotal > st.hmsCount) {
+      // Right-aligned above the reserved (0,56) status-icon row: the panel
+      // lists only the worst entry, so the count says what got dropped.
+      char more[12];
+      snprintf(more, sizeof(more), "+%u more",
+               (unsigned)(st.hmsTotal - st.hmsCount));
+      int16_t mx1, my1;
+      uint16_t mw, mh;
+      oled.getTextBounds(more, 0, 0, &mx1, &my1, &mw, &mh);
+      oled.setCursor(128 - (int)mw, LAYER_Y);
+      oled.print(more);
+    }
+  } else {
+    oled.print(F("print error"));
+  }
 #else
   oled.print(st.gcodeState);
-#endif
   oled.setCursor(0, LAYER_Y);
-  String name = monoCleanJobName(jobDisplayName(st));
-  if (name.length() > 21) name = name.substring(0, 18) + "...";
-  oled.print(name);
+  oled.print(name.length() > 0 ? name : String("--"));
+#endif
   monoDrawStatusIcon(0, BOTTOM_Y, MONO_SCR_FAILED);
   oled.setCursor(11, BOTTOM_Y);
   oled.print("error");
@@ -942,6 +1007,9 @@ struct MonoSig {
   unsigned total;
   int nzl, nzlT, bed, bedT;
   unsigned long err;
+  unsigned hmsAttr, hmsCode;  // worst HMS entry: the FAILED rows repaint on it
+  uint8_t hmsN;               // codes kept in hms[] ("+%u more" count)
+  uint8_t hmsTot;             // codes described ("+%u more" value)
   bool connected;
   char job[128];  // full clean-name cap (subtaskName[128]); must track, or a
                   // renamed job that shares its prefix never repaints
@@ -988,8 +1056,16 @@ static MonoSig makeSig(MonoScreen scr, MonoScreen rawScr, const BambuState &st) 
   s.bedT = tempInt(st.bedTarget);
 #if HAS_HMS_UI
   s.err = st.printError;
+  s.hmsAttr = st.hmsCount > 0 ? st.hms[0].attr : 0;
+  s.hmsCode = st.hmsCount > 0 ? st.hms[0].code : 0;
+  s.hmsN = st.hmsCount;
+  s.hmsTot = st.hmsTotal;
 #else
   s.err = 0;
+  s.hmsAttr = 0;
+  s.hmsCode = 0;
+  s.hmsN = 0;
+  s.hmsTot = 0;
 #endif
   s.connected = st.connected;
   String j = monoCleanJobName(jobDisplayName(st));
@@ -1025,6 +1101,8 @@ static bool sigSame(const MonoSig &a, const MonoSig &b) {
          a.remaining == b.remaining && a.layer == b.layer && a.total == b.total &&
          a.nzl == b.nzl && a.nzlT == b.nzlT && a.bed == b.bed && a.bedT == b.bedT &&
          a.err == b.err && a.connected == b.connected && strcmp(a.job, b.job) == 0 &&
+         a.hmsAttr == b.hmsAttr && a.hmsCode == b.hmsCode &&
+         a.hmsN == b.hmsN && a.hmsTot == b.hmsTot &&
          a.clockMin == b.clockMin &&
          a.dateFmt == b.dateFmt && a.hideDate == b.hideDate &&
          a.printTimeAlt == b.printTimeAlt &&
@@ -1127,8 +1205,15 @@ static void mockBuild(int idx, BambuState &o) {
       o.printing = false;
       strlcpy(o.subtaskName, "Failed_part", sizeof(o.subtaskName));
 #if HAS_HMS_UI
+      // One real-shaped entry + a described tail, so mock 5 exercises the
+      // full row set: 4-group code, severity word and the "+1 more" count.
       o.printError = 0x03008007UL;
       o.printErrorSeen = true;
+      o.hms[0] = { 0x03001A00UL, 0x00010002UL };  // severity 1 = fatal
+      o.hmsCount = 1;
+      o.hmsTotal = 2;
+      o.hmsOverflow = true;
+      o.hmsWorstSeverity = 1;
 #endif
       o.nozzleTemp = 180;
       o.bedTemp = 50;
@@ -1235,7 +1320,17 @@ void monoDisplayInit() {
   // until the tick paints the clock (this message was the "splash" users saw
   // even with the toggle off).
   if (monoSettings.showSplash) {
-    monoShowMessage("BambuHelper", "Mono starting");
+    // Brand splash: both halves of the name plus the firmware, all in the
+    // wordmark font ("BambuHelper-OLED" would be 174 px on one row).
+    oled.clearDisplay();
+    oled.setFont(&FreeMonoBold9pt7b);
+    oled.setCursor(0, SPLASH_TITLE_BASE);
+    oled.print("BambuHelper");
+    oled.setCursor(0, SPLASH_SUB_BASE);
+    oled.print("-OLED");
+    oled.setCursor(0, SPLASH_VER_BASE);
+    oled.print(FW_VERSION);
+    oled.display();
   } else {
     oled.clearDisplay();
     oled.display();
@@ -1268,54 +1363,65 @@ void monoShowBoot() {
   s_lastBootDrawMs = millis();
 }
 
+// "WiFi: <ssid>" / "IP: <ip>" on one 21-column row: the tag is fixed, the
+// value takes the rest and is cut with ".." when it is longer.
+static String monoFitTag(const char *tag, const String &value) {
+  const int room = BOOT_COLS - (int)strlen(tag);
+  String v = value;
+  if ((int)v.length() > room) {
+    v = (room > 2) ? v.substring(0, room - 2) + ".." : v.substring(0, room);
+  }
+  return String(tag) + v;
+}
+
+// "<name> - on|off": the state suffix always survives, the name is cut.
+static String monoNameState(const String &name, bool live) {
+  const char *suffix = live ? " - on" : " - off";
+  const int room = BOOT_COLS - (int)strlen(suffix);
+  String s = name;
+  if ((int)s.length() > room) s = s.substring(0, room);
+  return s + suffix;
+}
+
 static void renderBootScreen() {
   oled.clearDisplay();
-  // All default font (21 chars/row): header, helper IP, section, names.
+  // One centred size-1 row: the big title font cannot hold the full repo name
+  // (174 px) and a two-line wordmark would cost both printer rows.
   oled.setFont();
   oled.setTextSize(1);
+  const char *brand = "BambuHelper-OLED";
+  oled.setCursor((OLED_WIDTH - (int)strlen(brand) * 6) / 2, BOOT_BRAND_Y);
+  oled.print(brand);
+  oled.drawFastHLine(0, BOOT_RULE_Y, OLED_WIDTH, SH110X_WHITE);
   bool ap = isAPMode();
-  String head = ap ? getAPSSID() : String("-- Bambu Helper --");
-  if (head.length() > 21) head = head.substring(0, 21);
-  oled.setCursor(0, 4);
-  oled.print(head);
+  String ssid = ap ? getAPSSID() : WiFi.SSID();
+  if (ssid.length() == 0) ssid = "--";
+  oled.setCursor(0, BOOT_NET_Y);
+  oled.print(monoFitTag(ap ? "AP: " : "WiFi: ", ssid));
   String hip = ap ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
   if (hip == "0.0.0.0") hip = "connecting";
-  String ipline = "IP: " + hip;
-  if (ipline.length() > 21) ipline = ipline.substring(0, 21);
-  oled.setCursor(0, 12);
-  oled.print(ipline);
-  oled.setCursor(0, 20);
-  oled.print("Printers:");
-  int y = 28;
-  int shown = 0;
-  for (uint8_t i = 0; i < MAX_PRINTERS && y <= 52; i++) {
+  oled.setCursor(0, BOOT_IP_Y);
+  oled.print(monoFitTag("IP: ", hip));
+  uint8_t configured = 0;
+  for (uint8_t i = 0; i < MAX_PRINTERS; i++)
+    if (isPrinterConfigured(i)) configured++;
+  oled.setCursor(0, BOOT_LABEL_Y);
+  oled.print(configured == 1 ? "Printer:" : "Printers:");
+  int y = BOOT_LIST_Y;
+  uint8_t shown = 0;
+  for (uint8_t i = 0; i < MAX_PRINTERS && y <= BOOT_LIST_MAX_Y; i++) {
     if (!isPrinterConfigured(i)) continue;
     String nm = monoPrinterLabel(i);
     if (nm.length() == 0) nm = String("Printer ") + (int)(i + 1);
-    if (nm.length() > 16) nm = nm.substring(0, 16);
-    nm += monoSlotLive(i) ? " [on]" : " [off]";
     oled.setCursor(0, y);
-    oled.print(nm);
-    y += 8;
+    oled.print(monoNameState(nm, monoSlotLive(i)));
+    y += BOOT_LIST_STEP;
     shown++;
   }
   if (shown == 0) {
-    oled.setCursor(0, 28);
-    oled.print("no printer");
+    oled.setCursor(0, BOOT_LIST_Y);
+    oled.print("none configured");
   }
-  oled.display();
-}
-
-void monoShowMessage(const char *line1, const char *line2) {
-  if (!s_booted || !s_enabled) return;
-  oled.clearDisplay();
-  oled.setFont(&FreeMonoBold9pt7b);
-  oled.setCursor(0, 15);
-  oled.print(line1 ? line1 : "");
-  oled.setFont();
-  oled.setTextSize(1);
-  oled.setCursor(0, 34);
-  oled.print(line2 ? line2 : "");
   oled.display();
 }
 

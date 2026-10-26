@@ -57,6 +57,12 @@ BAR_H = 6
 BOTTOM_Y = 55
 MAX_LINE = 11          # MONO_MAX_CHAR_TITLE_PER_LINE (mono_display.h)
 
+# --- LAYOUT: mirrors renderFailed() ------------------------------------------
+FAILED_TITLE_Y = 12    # TITLE_SINGLE_Y
+FAILED_CODE_Y = 21     # TEMP_Y
+FAILED_SEV_Y = 34      # LAYER_Y
+FAILED_BOTTOM_Y = 56   # BOTTOM_Y
+
 # --- LAYOUT: mirrors renderFinish() -----------------------------------------
 DONE_TITLE_Y1 = 12
 DONE_TITLE_Y2 = 25
@@ -274,6 +280,88 @@ def render_printing(c: Canvas, sc: PrintScene) -> dict:
     return {"l1": l1, "l2": l2, "right": right, "stage": stage, "pct": pct}
 
 
+@dataclass
+class FailedScene:
+    """One mocked BambuState, for renderFailed()."""
+
+    label: str
+    job: str = "Failed_part"       # subtaskName (cleaned inside the renderer)
+    hms: tuple[tuple[int, int], ...] = (   # (attr, code), worst-first
+        (0x03001A00, 0x00010002),  # severity 1 = fatal, like a real dump
+    )
+    hms_total: int = 1             # described entries the printer reported
+    print_error: int = 0x03008007  # bare 32-bit HMI code when no HMS entries
+
+
+def draw_failed_title(c: Canvas, text: str) -> None:
+    """monoDrawTitle(): static single row, or a marquee clipped to the panel.
+
+    The hardware clips the marquee at 128 px mid-glyph while it scrolls; the
+    preview draws only the glyphs that fully fit and the caption says so.
+    """
+    if c.getTextBounds(text)[2] <= W:
+        c.setFont(c.gfx)
+        c.setCursor(0, FAILED_TITLE_Y)
+        c.print(text)
+        c.setFont()
+        return
+    c.setFont(c.gfx)
+    c.setCursor(0, FAILED_TITLE_Y)
+    for ch in text:
+        if c.cx is None:
+            break
+        t, y, w, _ = c.getTextBounds(ch)
+        if c.cx + w > W:
+            break
+        c.print(ch)
+    c.setFont()
+
+
+def draw_status_icon(c: Canvas, s: str, x: int, y: int) -> None:
+    """monoDrawStatusIcon() for the FAILED screen: warning triangle + '!'."""
+    c.drawTriangle(x + 3, y, x, y + 7, x + 7, y + 7)
+    c.drawFastVLine(x + 3, y + 2, 3)
+    c.drawPixel(x + 3, y + 6)
+
+
+def render_failed(c: Canvas, sc: FailedScene) -> dict:
+    """renderFailed() + hmsCodeText(), line by line."""
+    c.clear()
+    title = clean_job_name(sc.job)
+    draw_failed_title(c, title if title else "Error")
+
+    # Code row: worst HMS entry as Bambu writes it, bare print_error otherwise.
+    if sc.hms:
+        attr, code = sc.hms[0]
+        code_txt = (f"{attr >> 16:04X}-{attr & 0xFFFF:04X}"
+                    f"-{code >> 16:04X}-{code & 0xFFFF:04X}")
+    else:
+        code_txt = f"{sc.print_error >> 16:04X}-{sc.print_error & 0xFFFF:04X}"
+    c.setCursor(0, FAILED_CODE_Y)
+    c.print(code_txt)
+
+    # Severity row: word left, "+N more" right-aligned when codes were dropped.
+    c.setCursor(0, FAILED_SEV_Y)
+    if sc.hms:
+        sev = {1: "FATAL", 2: "SERIOUS", 3: "COMMON"}.get(
+            sc.hms[0][1] >> 16, "UNKNOWN")
+        c.print(sev)
+    else:
+        sev = "print error"
+        c.print(sev)
+    more = ""
+    if sc.hms and sc.hms_total > len(sc.hms):
+        more = f"+{sc.hms_total - len(sc.hms)} more"
+        c.setCursor(W - c.getTextBounds(more)[2], FAILED_SEV_Y)
+        c.print(more)
+
+    draw_status_icon(c, "failed", 0, FAILED_BOTTOM_Y)
+    c.setCursor(11, FAILED_BOTTOM_Y)
+    c.print("error")
+    return {"l1": title if title else "Error", "l2": code_txt,
+            "row34": f"{sev} {more}".rstrip()}
+
+
 def render_finish(c: Canvas, sc: DoneScene) -> dict:
     """renderFinish(), line by line."""
     c.clear()
@@ -371,6 +459,30 @@ def done_scenes() -> list[DoneScene]:
     ]
 
 
+def failed_scenes() -> list[FailedScene]:
+    return [
+        FailedScene("HMS fatal - single code"),
+        FailedScene("HMS serious - single code",
+                    hms=((0x03001A00, 0x00020002),)),
+        FailedScene("HMS common - single code",
+                    hms=((0x03001A00, 0x00030002),)),
+        FailedScene("HMS fatal + 1 more",
+                    hms=((0x03001A00, 0x00010002), (0x03001A00, 0x00020200)),
+                    hms_total=2),
+        FailedScene("HMS overflow +3 more", job="Bracket_v2",
+                    hms=((0x03001A00, 0x00010002), (0x03001A00, 0x00020300)),
+                    hms_total=5),
+        FailedScene("unknown severity - never alerts",
+                    hms=((0x03001A00, 0x00090002),)),
+        FailedScene("bare print_error - no HMS", hms=(), hms_total=0),
+        FailedScene("no job name - Error title", job=""),
+        FailedScene("long name (marquee frame 1)",
+                    job="Very_long_part_for_marquee_testing_that_overflows"
+                        ".gcode.3mf"),
+        FailedScene("non-Latin name - Error title", job="Печать"),
+    ]
+
+
 def done_matrix_scenes() -> list[DoneScene]:
     titles = [
         ("1-line", "Cube"),
@@ -413,6 +525,11 @@ def firmware_drift_warnings() -> list[str]:
     grab(r"static const int BAR_H = (\d+);", BAR_H, "BAR_H")
     grab(r"#define MONO_MAX_CHAR_TITLE_PER_LINE (\d+)", MAX_LINE,
          "MONO_MAX_CHAR_TITLE_PER_LINE", hdr)
+    grab(r"static const int TITLE_SINGLE_Y = (\d+);", FAILED_TITLE_Y,
+         "TITLE_SINGLE_Y")
+    grab(r"static const int TEMP_Y = (\d+);", FAILED_CODE_Y, "TEMP_Y")
+    grab(r"static const int LAYER_Y = (\d+);", FAILED_SEV_Y, "LAYER_Y")
+    grab(r"static const int BOTTOM_Y = (\d+);", FAILED_BOTTOM_Y, "BOTTOM_Y")
     grab(r"const int boxH = (\d+);", DONE_BOX_H, "finish boxH")
     grab(r"const int boxW = \(int\)w \+ (\d+);", DONE_BOX_PAD, "finish boxW pad")
     grab(r"const int boxY = (\d+);", DONE_BOX_Y, "finish boxY")
@@ -442,6 +559,9 @@ def run_sheet(kind: str, scenes: list, out: Path, font: bytes, gfx: GfxFont,
     if kind.startswith("printing"):
         print(f"  {'#':>2}  {'scene':<30} {'line1':<12} {'line2':<12} "
               f"{'bottom-left':<18} {'right':>7}  {'ink bbox':<14} result")
+    elif kind == "failed":
+        print(f"  {'#':>2}  {'scene':<30} {'title':<12} {'code':<13} "
+              f"{'sev row':<14} {'ink bbox':<14} result")
     else:
         print(f"  {'#':>2}  {'scene':<30} {'line1':<12} {'line2':<12} "
               f"{'box x..x+w':<13}  {'ink bbox':<14} result")
@@ -451,6 +571,9 @@ def run_sheet(kind: str, scenes: list, out: Path, font: bytes, gfx: GfxFont,
         if kind.startswith("printing"):
             info = render_printing(c, sc)
             extra = f"{info['stage'][:18]:<18} {info['right']:>7}"
+        elif kind == "failed":
+            info = render_failed(c, sc)
+            extra = f"{info['row34'][:14]:<14}"
         else:
             info = render_finish(c, sc)
             bx, _, bw, _ = info["box"]
@@ -471,9 +594,11 @@ def run_sheet(kind: str, scenes: list, out: Path, font: bytes, gfx: GfxFont,
             errs.append(f"ink bbox {bbox} leaves the panel")
         failed |= bool(errs)
         bb = f"{bbox[0]}..{bbox[2]} {bbox[1]}..{bbox[3]}" if bbox else "-"
+        extra_w = 27 if kind.startswith("printing") else \
+                  14 if kind == "failed" else 13
         print(f"  {i + 1:>2}  {sc.label:<30} "
               f"{info['l1'][:12]:<12} {info['l2'][:12]:<12} "
-              f"{extra:<{27 if kind.startswith('printing') else 13}} "
+              f"{extra:<{extra_w}} "
               f"{bb:<14} {'OK' if not errs else 'FAIL: ' + '; '.join(errs)}")
         panels.append((sc.label, c))
 
@@ -484,8 +609,8 @@ def run_sheet(kind: str, scenes: list, out: Path, font: bytes, gfx: GfxFont,
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Render the SH1106 printing/done screens to captioned PNGs.")
-    ap.add_argument("--screen", choices=("printing", "done", "all"),
+        description="Render the SH1106 printing/done/failed screens to captioned PNGs.")
+    ap.add_argument("--screen", choices=("printing", "done", "failed", "all"),
                     default="all", help="which screen(s) to render (default all)")
     ap.add_argument("--matrix", action="store_true",
                     help="render every boolean OLED setting combination")
@@ -517,6 +642,9 @@ def main() -> int:
         scenes = done_matrix_scenes() if args.matrix else done_scenes()
         suffix = "-matrix" if args.matrix else ""
         jobs.append(("done", scenes, args.out_dir / f"done{suffix}.png"))
+    if args.screen in ("failed", "all"):
+        jobs.append(("failed", failed_scenes(),
+                     args.out_dir / "failed.png"))
 
     for w in firmware_drift_warnings():
         print(f"warning: {w}", file=sys.stderr)

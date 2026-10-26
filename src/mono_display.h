@@ -95,9 +95,8 @@ void monoDrawTitle(const String &clean);               // 1 row, static or marqu
 
 // --- Screen API ----------------------------------------------------------------
 void monoDisplayInit();
-void monoShowBoot();  // helper IP + printer names with live [on]/[off],
-                      // held ~3 s (setup mode: AP SSID on the header row)
-void monoShowMessage(const char *line1, const char *line2);
+void monoShowBoot();  // helper SSID/IP + printer names with live "- on/- off",
+                      // held ~3 s (setup mode: the AP SSID on the WiFi row)
 void monoShowStatus(const BambuState &st);  // immediate render (compat)
 void monoShowError(unsigned long code);
 
