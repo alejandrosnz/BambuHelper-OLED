@@ -4,7 +4,7 @@
 // =============================================================================
 //  Firmware version and release location
 // =============================================================================
-#define FW_VERSION          "v3.9.4"
+#define FW_VERSION          "v3.9.5"
 
 // This fork publishes its own OTA builds. The web UI reads the latest release
 // from this repository and only offers assets named
